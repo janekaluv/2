@@ -222,22 +222,25 @@
                     .div(tf.scalar(255))  // Normalize to [0,1]
                     .expandDims();        // Add batch dimension
                 
-                // Run prediction
-                const prediction = await model.predict(tensor);
-                const mask = prediction.squeeze();
+                // Run prediction - MODIFIED THIS PART
+                const prediction = await model.execute(tensor);
+                const mask = prediction.squeeze ? prediction.squeeze() : tf.squeeze(prediction);
                 
                 // Create final result
                 await createResult(image, paddedCanvas, mask, offsetX, offsetY, newWidth, newHeight);
                 
-                // Clean up
+                // Clean up - ADDED MORE DISPOSE CALLS
                 tensor.dispose();
-                prediction.dispose();
+                if (prediction !== mask) prediction.dispose();
                 mask.dispose();
+                tf.disposeVariables();
                 
                 document.getElementById('status').textContent = "Done!";
             } catch (e) {
                 document.getElementById('status').textContent = "Error during processing: " + e.message;
                 console.error("Processing error:", e);
+                // Force garbage collection
+                await tf.nextFrame();
             }
         }
         
@@ -282,6 +285,9 @@
             const downloadLink = document.getElementById('download');
             downloadLink.href = resultCanvas.toDataURL('image/png');
             downloadLink.style.display = 'inline-block';
+            
+            // Force garbage collection
+            await tf.nextFrame();
         }
     </script>
 </body>
