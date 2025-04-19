@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Reliable Background Remover</title>
+    <title>U²-Net Background Remover</title>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
     <style>
         body { font-family: Arial, sans-serif; max-width: 1000px; margin: 0 auto; padding: 20px; }
@@ -13,13 +13,18 @@
         .column { flex: 1; text-align: center; }
         button { padding: 12px 24px; background: #4285f4; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
         #progress { width: 100%; margin: 10px 0; display: none; }
+        #cancel { display: none; background: #f44336; margin-left: 10px; }
+        .button-group { display: flex; justify-content: center; }
     </style>
 </head>
 <body>
-    <h1>Professional Background Remover</h1>
+    <h1>U²-Net Background Remover</h1>
     <div id="upload-container">
         <input type="file" id="upload" accept="image/*" style="display: none;">
-        <button onclick="document.getElementById('upload').click()">Select Image</button>
+        <div class="button-group">
+            <button onclick="document.getElementById('upload').click()">Select Image</button>
+            <button id="cancel">Cancel</button>
+        </div>
         <p>or drag and drop image here</p>
     </div>
     
@@ -37,14 +42,16 @@
         </div>
     </div>
     
-    <a id="download" href="#" download="perfect-bg-removed.png">Download Result</a>
+    <a id="download" href="#" download="background-removed.png">Download Result</a>
 
     <script>
         // Configuration
         const MODEL_PATH = 'model/model.json';
         const TARGET_SIZE = 320; // U²-Net processing size
+        const MAX_INPUT_DIMENSION = 1024; // Max size for input images
         let model = null;
         let isProcessing = false;
+        let processingCanceled = false;
         
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
@@ -54,6 +61,8 @@
             document.getElementById('upload').addEventListener('change', (e) => {
                 if (!isProcessing && e.target.files[0]) processFile(e.target.files[0]);
             });
+            
+            document.getElementById('cancel').addEventListener('click', cancelProcessing);
         });
         
         // Setup drag and drop
@@ -79,19 +88,27 @@
             });
         }
         
-        // Load TensorFlow.js model with WebGL fixes
+        // Cancel processing
+        function cancelProcessing() {
+            if (isProcessing) {
+                processingCanceled = true;
+                isProcessing = false;
+                document.getElementById('status').textContent = "Processing canceled";
+                document.getElementById('cancel').style.display = 'none';
+                // Force cleanup
+                tf.disposeVariables();
+            }
+        }
+        
+        // Load TensorFlow.js model
         async function loadModel() {
             try {
                 document.getElementById('status').textContent = "Loading AI model...";
                 document.getElementById('progress').style.display = 'block';
                 
-                // First verify model exists
+                // Verify model exists
                 const response = await fetch(MODEL_PATH);
-                if (!response.ok) throw new Error("Model files not found");
-                
-                // Important WebGL fixes
-                const glContext = tf.backend().getGPGPUContext().gl;
-                glContext.getExtension('WEBGL_lose_context').loseContext();
+                if (!response.ok) throw new Error("Model files not found. Check your model path.");
                 
                 // Load the model with progress tracking
                 model = await tf.loadGraphModel(MODEL_PATH, {
@@ -102,92 +119,130 @@
                     }
                 });
                 
+                // Warm up the model
+                await warmupModel();
+                
                 document.getElementById('progress').style.display = 'none';
                 document.getElementById('status').textContent = "Ready! Select an image";
+                console.log("Model loaded successfully");
             } catch (error) {
                 document.getElementById('status').textContent = `Error loading model: ${error.message}`;
                 console.error("Model loading failed:", error);
             }
         }
         
-        // Process uploaded file with WebGL safety
-        function processFile(file) {
+        // Warm up the model for faster first inference
+        async function warmupModel() {
+            const warmupTensor = tf.zeros([1, TARGET_SIZE, TARGET_SIZE, 3]);
+            await model.executeAsync(warmupTensor);
+            warmupTensor.dispose();
+        }
+        
+        // Process uploaded file
+        async function processFile(file) {
             if (!file.type.match('image.*')) {
-                document.getElementById('status').textContent = "Please select an image file";
+                document.getElementById('status').textContent = "Please select an image file (JPEG, PNG, etc.)";
                 return;
             }
             
             isProcessing = true;
-            const img = new Image();
-            img.onload = async () => {
-                if (model) {
-                    try {
-                        document.getElementById('status').textContent = "Processing...";
-                        
-                        // Show original image
-                        document.getElementById('original').src = img.src;
-                        document.getElementById('original').style.display = 'block';
-                        
-                        // Create processing canvas
-                        const { canvas, offsetX, offsetY, width, height } = createPaddedCanvas(img);
-                        
-                        // Process with model (with WebGL safety)
-                        const maskData = await safelyProcessWithModel(canvas);
-                        
-                        if (maskData) {
-                            // Create final result
-                            await createFinalResult(img, maskData, offsetX, offsetY, width, height);
-                            document.getElementById('status').textContent = "Done!";
-                        }
-                    } catch (error) {
-                        document.getElementById('status').textContent = `Error: ${error.message}`;
-                        console.error("Processing error:", error);
-                    } finally {
-                        isProcessing = false;
-                        // Force garbage collection
-                        await tf.nextFrame();
-                    }
-                } else {
-                    document.getElementById('status').textContent = "Model not loaded yet";
-                    isProcessing = false;
-                }
-            };
-            img.src = URL.createObjectURL(file);
-        }
-        
-        // Safe model processing with WebGL error handling
-        async function safelyProcessWithModel(canvas) {
+            processingCanceled = false;
+            document.getElementById('cancel').style.display = 'inline-block';
+            
             try {
-                // Create input tensor
-                const tensor = tf.tidy(() => {
-                    return tf.browser.fromPixels(canvas)
-                        .toFloat()
-                        .div(255)
-                        .expandDims();
-                });
+                document.getElementById('status').textContent = "Processing...";
                 
-                // Execute model with WebGL safety
-                const output = await model.executeAsync(tensor);
+                // Load and optionally resize the image
+                const { img, originalWidth, originalHeight } = await loadAndResizeImage(file);
                 
-                // Convert output to array
-                const maskArray = await processModelOutput(output);
+                // Show original image
+                document.getElementById('original').src = img.src;
+                document.getElementById('original').style.display = 'block';
                 
-                // Clean up
-                tensor.dispose();
-                if (output !== maskArray) output.dispose();
+                // Process with model
+                const mask = await generateMask(img);
+                if (processingCanceled) return;
                 
-                return maskArray;
+                // Apply mask to original image
+                await applyMask(img, mask, originalWidth, originalHeight);
+                
+                document.getElementById('status').textContent = "Done!";
             } catch (error) {
-                console.error("WebGL processing error:", error);
-                // Recover from WebGL errors
-                const glContext = tf.backend().getGPGPUContext().gl;
-                glContext.getExtension('WEBGL_lose_context').loseContext();
-                throw error;
+                if (!processingCanceled) {
+                    document.getElementById('status').textContent = `Error: ${error.message}`;
+                    console.error("Processing error:", error);
+                }
+            } finally {
+                isProcessing = false;
+                document.getElementById('cancel').style.display = 'none';
+                // Force garbage collection
+                await tf.nextFrame();
             }
         }
         
-        // Create properly padded canvas
-        function createPaddedCanvas(img) {
+        // Load and optionally resize the image
+        async function loadAndResizeImage(file) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.onload = async () => {
+                    let originalWidth = img.width;
+                    let originalHeight = img.height;
+                    
+                    // Downscale very large images to improve performance
+                    if (img.width > MAX_INPUT_DIMENSION || img.height > MAX_INPUT_DIMENSION) {
+                        const ratio = Math.min(
+                            MAX_INPUT_DIMENSION / img.width, 
+                            MAX_INPUT_DIMENSION / img.height
+                        );
+                        const canvas = document.createElement('canvas');
+                        canvas.width = img.width * ratio;
+                        canvas.height = img.height * ratio;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        
+                        // Replace the image with the resized version
+                        img.src = canvas.toDataURL('image/jpeg');
+                        await new Promise(resolve => img.onload = resolve);
+                    }
+                    
+                    resolve({ img, originalWidth, originalHeight });
+                };
+                img.onerror = () => reject(new Error("Failed to load image"));
+                img.src = URL.createObjectURL(file);
+            });
+        }
+        
+        // Generate mask using U²-Net
+        async function generateMask(img) {
+            // Create input tensor
+            const { tensor, canvas } = await prepareInputTensor(img);
+            
+            // Execute model
+            console.time('Model Inference');
+            const output = await model.executeAsync(tensor);
+            console.timeEnd('Model Inference');
+            
+            // Process output
+            let maskTensor = output;
+            if (Array.isArray(output)) {
+                maskTensor = output[0]; // Take first output if multiple
+            }
+            
+            // Convert to array
+            const maskArray = await maskTensor.array();
+            
+            // Clean up
+            tensor.dispose();
+            if (maskTensor !== output) maskTensor.dispose();
+            if (Array.isArray(output)) {
+                output.forEach(t => t.dispose());
+            }
+            
+            return maskArray;
+        }
+        
+        // Prepare input tensor for the model
+        async function prepareInputTensor(img) {
             const canvas = document.createElement('canvas');
             canvas.width = TARGET_SIZE;
             canvas.height = TARGET_SIZE;
@@ -210,98 +265,57 @@
             // Draw centered image
             ctx.drawImage(img, offsetX, offsetY, width, height);
             
-            return { canvas, offsetX, offsetY, width, height };
+            // Create tensor
+            const tensor = tf.tidy(() => {
+                return tf.browser.fromPixels(canvas)
+                    .toFloat()
+                    .div(255)
+                    .expandDims();
+            });
+            
+            return { tensor, canvas, offsetX, offsetY, width, height };
         }
         
-        // Process model output
-        async function processModelOutput(output) {
-            // Get the actual mask tensor
-            let maskTensor = output;
-            if (Array.isArray(output)) {
-                maskTensor = output[0]; // Take first output if multiple
-            }
-            
-            // Remove batch dimension if needed
-            if (maskTensor.shape && maskTensor.shape.length === 4) {
-                maskTensor = maskTensor.squeeze([0]);
-            }
-            
-            // Convert to array
-            const maskArray = await maskTensor.array();
-            
-            // Clean up
-            if (maskTensor !== output) maskTensor.dispose();
-            if (Array.isArray(output)) {
-                output.forEach(t => t.dispose());
-            }
-            
-            return maskArray;
-        }
-        
-        // Create final high-quality result
-        async function createFinalResult(img, maskArray, offsetX, offsetY, width, height) {
+        // Apply mask to original image
+        async function applyMask(img, maskArray, originalWidth, originalHeight) {
             const resultCanvas = document.getElementById('result');
-            resultCanvas.width = img.width;
-            resultCanvas.height = img.height;
+            resultCanvas.width = originalWidth;
+            resultCanvas.height = originalHeight;
             const resultCtx = resultCanvas.getContext('2d');
             
-            // Draw original image
-            resultCtx.drawImage(img, 0, 0);
+            // Draw original image (or resized version)
+            resultCtx.drawImage(img, 0, 0, originalWidth, originalHeight);
             
-            // Get image data
-            const imageData = resultCtx.getImageData(0, 0, img.width, img.height);
+            // Create mask canvas
+            const maskCanvas = document.createElement('canvas');
+            maskCanvas.width = TARGET_SIZE;
+            maskCanvas.height = TARGET_SIZE;
+            const maskCtx = maskCanvas.getContext('2d');
             
-            // Calculate scale factors
-            const scaleX = width / TARGET_SIZE;
-            const scaleY = height / TARGET_SIZE;
-            
-            // Edge refinement parameters
-            const edgeSmoothingRadius = 2;
-            const edgeThreshold = 0.3;
-            
-            // Apply mask to each pixel with edge refinement
-            for (let y = 0; y < img.height; y++) {
-                for (let x = 0; x < img.width; x++) {
-                    // Calculate position in mask
-                    const maskX = Math.min(TARGET_SIZE - 1, Math.floor((x / img.width) * width / scaleX));
-                    const maskY = Math.min(TARGET_SIZE - 1, Math.floor((y / img.height) * height / scaleY));
-                    
-                    // Get base mask value
-                    let maskValue = maskArray[maskY][maskX];
-                    
-                    // Edge refinement - check neighboring pixels
-                    if (maskValue > edgeThreshold && maskValue < (1 - edgeThreshold)) {
-                        let edgeSum = 0;
-                        let edgeCount = 0;
-                        
-                        for (let dy = -edgeSmoothingRadius; dy <= edgeSmoothingRadius; dy++) {
-                            for (let dx = -edgeSmoothingRadius; dx <= edgeSmoothingRadius; dx++) {
-                                const nx = Math.min(TARGET_SIZE - 1, Math.max(0, maskX + dx));
-                                const ny = Math.min(TARGET_SIZE - 1, Math.max(0, maskY + dy));
-                                
-                                edgeSum += maskArray[ny][nx];
-                                edgeCount++;
-                            }
-                        }
-                        
-                        // Smooth transition at edges
-                        maskValue = edgeSum / edgeCount;
-                    }
-                    
-                    // Apply threshold after smoothing
-                    const alpha = maskValue > 0.5 ? 255 : 0;
-                    
-                    // Set alpha channel
-                    const idx = (y * img.width + x) * 4 + 3;
-                    imageData.data[idx] = alpha;
+            // Draw the mask
+            const maskImageData = maskCtx.createImageData(TARGET_SIZE, TARGET_SIZE);
+            for (let y = 0; y < TARGET_SIZE; y++) {
+                for (let x = 0; x < TARGET_SIZE; x++) {
+                    const value = Math.round(maskArray[y][x] * 255);
+                    const idx = (y * TARGET_SIZE + x) * 4;
+                    maskImageData.data[idx] = value;
+                    maskImageData.data[idx + 1] = value;
+                    maskImageData.data[idx + 2] = value;
+                    maskImageData.data[idx + 3] = 255;
                 }
             }
+            maskCtx.putImageData(maskImageData, 0, 0);
             
-            // Apply to result canvas
-            resultCtx.putImageData(imageData, 0, 0);
+            // Apply mask using compositing
+            resultCtx.globalCompositeOperation = 'destination-in';
+            resultCtx.drawImage(maskCanvas, 
+                0, 0, TARGET_SIZE, TARGET_SIZE,
+                0, 0, originalWidth, originalHeight
+            );
+            resultCtx.globalCompositeOperation = 'source-over';
+            
+            // Display result
             resultCanvas.style.display = 'block';
-            
-            // Set download link
             document.getElementById('download').href = resultCanvas.toDataURL('image/png');
             document.getElementById('download').style.display = 'inline-block';
         }
