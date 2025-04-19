@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Flawless Background Remover</title>
+    <title>Reliable Background Remover</title>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
     <style>
         body { font-family: Arial, sans-serif; max-width: 1000px; margin: 0 auto; padding: 20px; }
@@ -16,7 +16,7 @@
     </style>
 </head>
 <body>
-    <h1>Flawless Background Remover</h1>
+    <h1>Professional Background Remover</h1>
     <div id="upload-container">
         <input type="file" id="upload" accept="image/*" style="display: none;">
         <button onclick="document.getElementById('upload').click()">Select Image</button>
@@ -37,13 +37,14 @@
         </div>
     </div>
     
-    <a id="download" href="#" download="flawless-bg-removed.png">Download Result</a>
+    <a id="download" href="#" download="perfect-bg-removed.png">Download Result</a>
 
     <script>
         // Configuration
         const MODEL_PATH = 'model/model.json';
-        const PROCESSING_SIZE = 320; // U²-Net processing size
+        const TARGET_SIZE = 320; // U²-Net processing size
         let model = null;
+        let isProcessing = false;
         
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
@@ -51,7 +52,7 @@
             loadModel();
             
             document.getElementById('upload').addEventListener('change', (e) => {
-                if (e.target.files[0]) processFile(e.target.files[0]);
+                if (!isProcessing && e.target.files[0]) processFile(e.target.files[0]);
             });
         });
         
@@ -74,44 +75,49 @@
                 e.preventDefault();
                 container.style.borderColor = '#ccc';
                 container.style.background = '#f9f9f9';
-                if (e.dataTransfer.files[0]) processFile(e.dataTransfer.files[0]);
+                if (!isProcessing && e.dataTransfer.files[0]) processFile(e.dataTransfer.files[0]);
             });
         }
         
-        // Load TensorFlow.js model
+        // Load TensorFlow.js model with WebGL fixes
         async function loadModel() {
             try {
-                document.getElementById('status').textContent = "Loading AI model (≈30MB)...";
+                document.getElementById('status').textContent = "Loading AI model...";
                 document.getElementById('progress').style.display = 'block';
                 
-                // Verify model exists
+                // First verify model exists
                 const response = await fetch(MODEL_PATH);
                 if (!response.ok) throw new Error("Model files not found");
+                
+                // Important WebGL fixes
+                const glContext = tf.backend().getGPGPUContext().gl;
+                glContext.getExtension('WEBGL_lose_context').loseContext();
                 
                 // Load the model with progress tracking
                 model = await tf.loadGraphModel(MODEL_PATH, {
                     onProgress: (progress) => {
                         const percent = Math.round(progress * 100);
                         document.getElementById('progress').value = percent;
-                        document.getElementById('status').textContent = `Downloading model: ${percent}%`;
+                        document.getElementById('status').textContent = `Loading model: ${percent}%`;
                     }
                 });
                 
                 document.getElementById('progress').style.display = 'none';
-                document.getElementById('status').textContent = "Model loaded! Select an image";
+                document.getElementById('status').textContent = "Ready! Select an image";
             } catch (error) {
                 document.getElementById('status').textContent = `Error loading model: ${error.message}`;
                 console.error("Model loading failed:", error);
             }
         }
         
-        // Process uploaded file
+        // Process uploaded file with WebGL safety
         function processFile(file) {
             if (!file.type.match('image.*')) {
-                document.getElementById('status').textContent = "Please select an image file (JPEG, PNG)";
+                document.getElementById('status').textContent = "Please select an image file";
                 return;
             }
             
+            isProcessing = true;
             const img = new Image();
             img.onload = async () => {
                 if (model) {
@@ -122,90 +128,89 @@
                         document.getElementById('original').src = img.src;
                         document.getElementById('original').style.display = 'block';
                         
-                        // Create processing canvas (maintains aspect ratio)
-                        const { canvas, offsetX, offsetY, procWidth, procHeight } = createProcessingCanvas(img);
+                        // Create processing canvas
+                        const { canvas, offsetX, offsetY, width, height } = createPaddedCanvas(img);
                         
-                        // Process with model
-                        const maskData = await processWithModel(canvas);
+                        // Process with model (with WebGL safety)
+                        const maskData = await safelyProcessWithModel(canvas);
                         
-                        // Create flawless result
-                        await createFlawlessResult(img, maskData, offsetX, offsetY, procWidth, procHeight);
-                        
-                        document.getElementById('status').textContent = "Done!";
+                        if (maskData) {
+                            // Create final result
+                            await createFinalResult(img, maskData, offsetX, offsetY, width, height);
+                            document.getElementById('status').textContent = "Done!";
+                        }
                     } catch (error) {
                         document.getElementById('status').textContent = `Error: ${error.message}`;
                         console.error("Processing error:", error);
+                    } finally {
+                        isProcessing = false;
+                        // Force garbage collection
+                        await tf.nextFrame();
                     }
                 } else {
                     document.getElementById('status').textContent = "Model not loaded yet";
+                    isProcessing = false;
                 }
             };
             img.src = URL.createObjectURL(file);
         }
         
-        // Create processing canvas that maintains aspect ratio
-        function createProcessingCanvas(img) {
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            
-            // Calculate dimensions to maintain aspect ratio
-            const ratio = Math.min(
-                PROCESSING_SIZE / img.width, 
-                PROCESSING_SIZE / img.height
-            );
-            const procWidth = Math.floor(img.width * ratio);
-            const procHeight = Math.floor(img.height * ratio);
-            canvas.width = procWidth;
-            canvas.height = procHeight;
-            
-            // Draw image (no stretching)
-            ctx.drawImage(img, 0, 0, procWidth, procHeight);
-            
-            // Create padded version for model (320x320)
-            const paddedCanvas = document.createElement('canvas');
-            paddedCanvas.width = PROCESSING_SIZE;
-            paddedCanvas.height = PROCESSING_SIZE;
-            const paddedCtx = paddedCanvas.getContext('2d');
-            
-            // Fill with black and center the image
-            paddedCtx.fillStyle = 'black';
-            paddedCtx.fillRect(0, 0, PROCESSING_SIZE, PROCESSING_SIZE);
-            const offsetX = (PROCESSING_SIZE - procWidth) / 2;
-            const offsetY = (PROCESSING_SIZE - procHeight) / 2;
-            paddedCtx.drawImage(canvas, offsetX, offsetY);
-            
-            return { 
-                canvas: paddedCanvas, 
-                offsetX, 
-                offsetY,
-                procWidth,
-                procHeight
-            };
-        }
-        
-        // Process image with model
-        async function processWithModel(canvas) {
-            // Create input tensor
-            const tensor = tf.tidy(() => {
-                return tf.browser.fromPixels(canvas)
-                    .toFloat()
-                    .div(255)
-                    .expandDims();
-            });
-            
+        // Safe model processing with WebGL error handling
+        async function safelyProcessWithModel(canvas) {
             try {
-                // Execute model
+                // Create input tensor
+                const tensor = tf.tidy(() => {
+                    return tf.browser.fromPixels(canvas)
+                        .toFloat()
+                        .div(255)
+                        .expandDims();
+                });
+                
+                // Execute model with WebGL safety
                 const output = await model.executeAsync(tensor);
                 
                 // Convert output to array
                 const maskArray = await processModelOutput(output);
                 
-                return maskArray;
-            } finally {
-                // Clean up tensors
+                // Clean up
                 tensor.dispose();
-                await tf.nextFrame();
+                if (output !== maskArray) output.dispose();
+                
+                return maskArray;
+            } catch (error) {
+                console.error("WebGL processing error:", error);
+                // Recover from WebGL errors
+                const glContext = tf.backend().getGPGPUContext().gl;
+                glContext.getExtension('WEBGL_lose_context').loseContext();
+                throw error;
             }
+        }
+        
+        // Create properly padded canvas
+        function createPaddedCanvas(img) {
+            const canvas = document.createElement('canvas');
+            canvas.width = TARGET_SIZE;
+            canvas.height = TARGET_SIZE;
+            const ctx = canvas.getContext('2d');
+            
+            // Fill with black background
+            ctx.fillStyle = 'black';
+            ctx.fillRect(0, 0, TARGET_SIZE, TARGET_SIZE);
+            
+            // Calculate dimensions to maintain aspect ratio
+            const ratio = Math.min(
+                TARGET_SIZE / img.width, 
+                TARGET_SIZE / img.height
+            );
+            const width = Math.floor(img.width * ratio);
+            const height = Math.floor(img.height * ratio);
+            const offsetX = (TARGET_SIZE - width) / 2;
+            const offsetY = (TARGET_SIZE - height) / 2;
+            
+            // Draw centered image
+            ctx.drawImage(img, offsetX, offsetY, width, height);
+            
+            return { canvas, offsetX, offsetY, width, height };
         }
         
         // Process model output
@@ -228,15 +233,13 @@
             if (maskTensor !== output) maskTensor.dispose();
             if (Array.isArray(output)) {
                 output.forEach(t => t.dispose());
-            } else {
-                output.dispose();
             }
             
             return maskArray;
         }
         
-        // Create flawless result with perfect edges
-        async function createFlawlessResult(img, maskArray, offsetX, offsetY, procWidth, procHeight) {
+        // Create final high-quality result
+        async function createFinalResult(img, maskArray, offsetX, offsetY, width, height) {
             const resultCanvas = document.getElementById('result');
             resultCanvas.width = img.width;
             resultCanvas.height = img.height;
@@ -249,8 +252,8 @@
             const imageData = resultCtx.getImageData(0, 0, img.width, img.height);
             
             // Calculate scale factors
-            const scaleX = procWidth / PROCESSING_SIZE;
-            const scaleY = procHeight / PROCESSING_SIZE;
+            const scaleX = width / TARGET_SIZE;
+            const scaleY = height / TARGET_SIZE;
             
             // Edge refinement parameters
             const edgeSmoothingRadius = 2;
@@ -260,8 +263,8 @@
             for (let y = 0; y < img.height; y++) {
                 for (let x = 0; x < img.width; x++) {
                     // Calculate position in mask
-                    const maskX = Math.min(PROCESSING_SIZE - 1, Math.floor((x / img.width) * procWidth / scaleX));
-                    const maskY = Math.min(PROCESSING_SIZE - 1, Math.floor((y / img.height) * procHeight / scaleY));
+                    const maskX = Math.min(TARGET_SIZE - 1, Math.floor((x / img.width) * width / scaleX));
+                    const maskY = Math.min(TARGET_SIZE - 1, Math.floor((y / img.height) * height / scaleY));
                     
                     // Get base mask value
                     let maskValue = maskArray[maskY][maskX];
@@ -273,8 +276,8 @@
                         
                         for (let dy = -edgeSmoothingRadius; dy <= edgeSmoothingRadius; dy++) {
                             for (let dx = -edgeSmoothingRadius; dx <= edgeSmoothingRadius; dx++) {
-                                const nx = Math.min(PROCESSING_SIZE - 1, Math.max(0, maskX + dx));
-                                const ny = Math.min(PROCESSING_SIZE - 1, Math.max(0, maskY + dy));
+                                const nx = Math.min(TARGET_SIZE - 1, Math.max(0, maskX + dx));
+                                const ny = Math.min(TARGET_SIZE - 1, Math.max(0, maskY + dy));
                                 
                                 edgeSum += maskArray[ny][nx];
                                 edgeCount++;
@@ -298,11 +301,9 @@
             resultCtx.putImageData(imageData, 0, 0);
             resultCanvas.style.display = 'block';
             
-            // Set download link with highest quality
-            const downloadLink = document.getElementById('download');
-            downloadLink.href = resultCanvas.toDataURL('image/png', 1.0);
-            downloadLink.style.display = 'inline-block';
-            downloadLink.download = `flawless-bg-removed-${Date.now()}.png`;
+            // Set download link
+            document.getElementById('download').href = resultCanvas.toDataURL('image/png');
+            document.getElementById('download').style.display = 'inline-block';
         }
     </script>
 </body>
