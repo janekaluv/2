@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Working Background Remover</title>
+    <title>Optimized Background Remover</title>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
     <style>
         body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
@@ -12,6 +12,7 @@
         .container { display: flex; gap: 20px; justify-content: center; }
         .column { flex: 1; text-align: center; }
         button { padding: 10px 20px; background: #4285f4; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        #progress { width: 100%; margin: 10px 0; display: none; }
     </style>
 </head>
 <body>
@@ -23,6 +24,7 @@
     </div>
     
     <div id="status">Loading model...</div>
+    <progress id="progress" value="0" max="100"></progress>
     
     <div class="container">
         <div class="column">
@@ -75,17 +77,26 @@
             });
         }
         
-        // Load TensorFlow.js model
+        // Load TensorFlow.js model with memory management
         async function loadModel() {
             try {
                 document.getElementById('status').textContent = "Loading model...";
+                document.getElementById('progress').style.display = 'block';
                 
                 // Verify model exists
                 const response = await fetch(MODEL_PATH);
                 if (!response.ok) throw new Error("Model files not found");
                 
-                // Load the model
-                model = await tf.loadGraphModel(MODEL_PATH);
+                // Load the model with progress updates
+                model = await tf.loadGraphModel(MODEL_PATH, {
+                    onProgress: (progress) => {
+                        const percent = Math.round(progress * 100);
+                        document.getElementById('progress').value = percent;
+                        document.getElementById('status').textContent = `Loading model: ${percent}%`;
+                    }
+                });
+                
+                document.getElementById('progress').style.display = 'none';
                 document.getElementById('status').textContent = "Ready! Select an image";
             } catch (error) {
                 document.getElementById('status').textContent = `Error loading model: ${error.message}`;
@@ -93,7 +104,7 @@
             }
         }
         
-        // Process uploaded file
+        // Process uploaded file with memory management
         function processFile(file) {
             if (!file.type.match('image.*')) {
                 document.getElementById('status').textContent = "Please select an image file";
@@ -113,16 +124,38 @@
                         // Create working canvas
                         const { canvas, offsetX, offsetY, width, height } = createPaddedCanvas(img);
                         
-                        // Process with model - FIXED: Use proper output handling
-                        const maskTensor = await generateMask(canvas);
+                        // Process with model - with memory cleanup
+                        const maskData = await tf.tidy(() => {
+                            const tensor = tf.browser.fromPixels(canvas)
+                                .toFloat()
+                                .div(255)
+                                .expandDims();
+                            
+                            // Execute model and get data
+                            const output = model.execute(tensor);
+                            
+                            // Handle different output formats
+                            let mask;
+                            if (output.shape && output.shape.length === 4) {
+                                mask = output.squeeze([0]); // Remove batch dimension
+                            } else {
+                                mask = output;
+                            }
+                            
+                            // Convert to data before disposing
+                            return mask.dataSync();
+                        });
                         
                         // Create final result
-                        await createFinalResult(img, maskTensor, offsetX, offsetY, width, height);
+                        await createFinalResult(img, maskData, offsetX, offsetY, width, height);
                         
                         document.getElementById('status').textContent = "Done!";
                     } catch (error) {
                         document.getElementById('status').textContent = `Error: ${error.message}`;
                         console.error("Processing error:", error);
+                        
+                        // Force garbage collection
+                        await tf.nextFrame();
                     }
                 } else {
                     document.getElementById('status').textContent = "Model not loaded yet";
@@ -158,29 +191,8 @@
             return { canvas, offsetX, offsetY, width, height };
         }
         
-        // Generate mask from image - FIXED: Proper tensor handling
-        async function generateMask(canvas) {
-            return tf.tidy(() => {
-                // Convert to tensor and normalize
-                const tensor = tf.browser.fromPixels(canvas)
-                    .toFloat()
-                    .div(255)
-                    .expandDims();
-                
-                // Execute model
-                const output = model.execute(tensor);
-                
-                // Handle different output types - FIX for squeeze() error
-                if (output.shape && output.shape.length === 4) {
-                    // Remove batch dimension if needed
-                    return output.squeeze([0]);
-                }
-                return output;
-            });
-        }
-        
-        // Create final result - FIXED: Proper mask handling
-        async function createFinalResult(img, maskTensor, offsetX, offsetY, width, height) {
+        // Create final result using mask data
+        async function createFinalResult(img, maskData, offsetX, offsetY, width, height) {
             const resultCanvas = document.getElementById('result');
             resultCanvas.width = img.width;
             resultCanvas.height = img.height;
@@ -189,8 +201,7 @@
             // Draw original image
             resultCtx.drawImage(img, 0, 0);
             
-            // Get mask data - FIXED: Properly handle tensor output
-            const maskData = await maskTensor.array();
+            // Get image data
             const imageData = resultCtx.getImageData(0, 0, img.width, img.height);
             
             // Calculate scale factors
@@ -201,18 +212,11 @@
             for (let y = 0; y < img.height; y++) {
                 for (let x = 0; x < img.width; x++) {
                     // Calculate position in mask
-                    const maskX = Math.floor((x / img.width) * width / scaleX);
-                    const maskY = Math.floor((y / img.height) * height / scaleY);
+                    const maskX = Math.min(TARGET_SIZE - 1, Math.floor((x / img.width) * width / scaleX));
+                    const maskY = Math.min(TARGET_SIZE - 1, Math.floor((y / img.height) * height / scaleY));
                     
-                    // Get mask value (handling different tensor formats)
-                    let maskValue;
-                    if (Array.isArray(maskData[0][0])) {
-                        // 2D array format
-                        maskValue = maskData[maskY][maskX] > 0.5 ? 1 : 0;
-                    } else if (Array.isArray(maskData[0])) {
-                        // 1D array format
-                        maskValue = maskData[maskY * TARGET_SIZE + maskX] > 0.5 ? 1 : 0;
-                    }
+                    // Get mask value (using dataSync() array)
+                    const maskValue = maskData[maskY * TARGET_SIZE + maskX] > 0.5 ? 1 : 0;
                     
                     // Set alpha channel
                     const idx = (y * img.width + x) * 4 + 3;
@@ -228,8 +232,8 @@
             document.getElementById('download').href = resultCanvas.toDataURL('image/png');
             document.getElementById('download').style.display = 'inline-block';
             
-            // Clean up
-            maskTensor.dispose();
+            // Force garbage collection
+            await tf.nextFrame();
         }
     </script>
 </body>
