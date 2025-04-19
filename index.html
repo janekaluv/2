@@ -22,9 +22,11 @@
   <canvas id="outputCanvas" width="320" height="320"></canvas>
 
   <script>
-    const MODEL_URL = '/model/model.json'  // 🔁 update if needed
+    // Update this path to match your repo structure:
+    const MODEL_URL = '/model/model.json';  // For local testing
+    // const MODEL_URL = '/your-repo-name/model/model.json';  // For GitHub Pages
     const TARGET_SIZE = 320;
-    const THRESHOLD = 0.3; // Lower = more aggressive background cut
+    const THRESHOLD = 0.3;
 
     let model = null;
 
