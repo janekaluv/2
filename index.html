@@ -1,12 +1,12 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Fast Quality Background Remover</title>
+    <title>Working Background Remover</title>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
     <style>
-        body { font-family: Arial, sans-serif; max-width: 1000px; margin: 0 auto; padding: 20px; }
-        #upload-container { margin: 20px 0; padding: 30px; border: 2px dashed #ccc; text-align: center; }
-        #original, #result { max-width: 100%; max-height: 500px; display: none; margin-top: 20px; border: 1px solid #eee; }
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        #upload-container { margin: 20px 0; padding: 20px; border: 2px dashed #ccc; text-align: center; }
+        #original, #result { max-width: 100%; max-height: 400px; display: none; margin-top: 20px; border: 1px solid #eee; }
         #download { margin: 20px auto; padding: 10px 20px; background: #4CAF50; color: white; border: none; border-radius: 4px; display: none; }
         #status { margin: 10px 0; min-height: 24px; }
         .container { display: flex; gap: 20px; justify-content: center; }
@@ -15,7 +15,7 @@
     </style>
 </head>
 <body>
-    <h1>Fast Quality Background Remover</h1>
+    <h1>Background Remover</h1>
     <div id="upload-container">
         <input type="file" id="upload" accept="image/*" style="display: none;">
         <button onclick="document.getElementById('upload').click()">Select Image</button>
@@ -110,14 +110,14 @@
                         document.getElementById('original').src = img.src;
                         document.getElementById('original').style.display = 'block';
                         
-                        // Create working canvas at target size
-                        const { canvas, scale } = createWorkingCanvas(img);
+                        // Create working canvas
+                        const { canvas, offsetX, offsetY, width, height } = createPaddedCanvas(img);
                         
-                        // Process with model
-                        const mask = await generateMask(canvas);
+                        // Process with model - FIXED: Use proper output handling
+                        const maskTensor = await generateMask(canvas);
                         
-                        // Create high quality result
-                        await createHighQualityResult(img, mask, scale);
+                        // Create final result
+                        await createFinalResult(img, maskTensor, offsetX, offsetY, width, height);
                         
                         document.getElementById('status').textContent = "Done!";
                     } catch (error) {
@@ -131,61 +131,56 @@
             img.src = URL.createObjectURL(file);
         }
         
-        // Create working canvas at target size while maintaining aspect ratio
-        function createWorkingCanvas(img) {
+        // Create properly padded canvas
+        function createPaddedCanvas(img) {
             const canvas = document.createElement('canvas');
+            canvas.width = TARGET_SIZE;
+            canvas.height = TARGET_SIZE;
             const ctx = canvas.getContext('2d');
             
+            // Fill with black background
+            ctx.fillStyle = 'black';
+            ctx.fillRect(0, 0, TARGET_SIZE, TARGET_SIZE);
+            
             // Calculate dimensions to maintain aspect ratio
-            const scale = Math.min(
+            const ratio = Math.min(
                 TARGET_SIZE / img.width, 
                 TARGET_SIZE / img.height
             );
-            canvas.width = Math.floor(img.width * scale);
-            canvas.height = Math.floor(img.height * scale);
+            const width = Math.floor(img.width * ratio);
+            const height = Math.floor(img.height * ratio);
+            const offsetX = (TARGET_SIZE - width) / 2;
+            const offsetY = (TARGET_SIZE - height) / 2;
             
-            // Draw image
-            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            // Draw centered image
+            ctx.drawImage(img, offsetX, offsetY, width, height);
             
-            return { canvas, scale };
+            return { canvas, offsetX, offsetY, width, height };
         }
         
-        // Generate mask from image
+        // Generate mask from image - FIXED: Proper tensor handling
         async function generateMask(canvas) {
-            // Create padded input for model (320x320)
-            const paddedCanvas = document.createElement('canvas');
-            paddedCanvas.width = TARGET_SIZE;
-            paddedCanvas.height = TARGET_SIZE;
-            const paddedCtx = paddedCanvas.getContext('2d');
-            
-            // Fill with black and center the image
-            paddedCtx.fillStyle = 'black';
-            paddedCtx.fillRect(0, 0, TARGET_SIZE, TARGET_SIZE);
-            const offsetX = (TARGET_SIZE - canvas.width) / 2;
-            const offsetY = (TARGET_SIZE - canvas.height) / 2;
-            paddedCtx.drawImage(canvas, offsetX, offsetY);
-            
-            // Convert to tensor and normalize
-            const tensor = tf.tidy(() => {
-                return tf.browser.fromPixels(paddedCanvas)
+            return tf.tidy(() => {
+                // Convert to tensor and normalize
+                const tensor = tf.browser.fromPixels(canvas)
                     .toFloat()
                     .div(255)
                     .expandDims();
+                
+                // Execute model
+                const output = model.execute(tensor);
+                
+                // Handle different output types - FIX for squeeze() error
+                if (output.shape && output.shape.length === 4) {
+                    // Remove batch dimension if needed
+                    return output.squeeze([0]);
+                }
+                return output;
             });
-            
-            // Execute model
-            const output = await model.executeAsync(tensor);
-            const mask = output.squeeze();
-            
-            // Clean up
-            tensor.dispose();
-            output.dispose();
-            
-            return { mask, offsetX, offsetY };
         }
         
-        // Create high quality result from original image
-        async function createHighQualityResult(img, { mask, offsetX, offsetY }, scale) {
+        // Create final result - FIXED: Proper mask handling
+        async function createFinalResult(img, maskTensor, offsetX, offsetY, width, height) {
             const resultCanvas = document.getElementById('result');
             resultCanvas.width = img.width;
             resultCanvas.height = img.height;
@@ -194,23 +189,34 @@
             // Draw original image
             resultCtx.drawImage(img, 0, 0);
             
-            // Get mask data
-            const maskData = await mask.array();
+            // Get mask data - FIXED: Properly handle tensor output
+            const maskData = await maskTensor.array();
             const imageData = resultCtx.getImageData(0, 0, img.width, img.height);
+            
+            // Calculate scale factors
+            const scaleX = width / TARGET_SIZE;
+            const scaleY = height / TARGET_SIZE;
             
             // Apply mask to each pixel
             for (let y = 0; y < img.height; y++) {
                 for (let x = 0; x < img.width; x++) {
                     // Calculate position in mask
-                    const maskX = Math.floor(x * scale) + offsetX;
-                    const maskY = Math.floor(y * scale) + offsetY;
+                    const maskX = Math.floor((x / img.width) * width / scaleX);
+                    const maskY = Math.floor((y / img.height) * height / scaleY);
                     
-                    // Only process if within mask bounds
-                    if (maskX >= 0 && maskX < TARGET_SIZE && maskY >= 0 && maskY < TARGET_SIZE) {
-                        const maskValue = maskData[maskY][maskX] > 0.5 ? 255 : 0;
-                        const idx = (y * img.width + x) * 4 + 3;
-                        imageData.data[idx] = maskValue;
+                    // Get mask value (handling different tensor formats)
+                    let maskValue;
+                    if (Array.isArray(maskData[0][0])) {
+                        // 2D array format
+                        maskValue = maskData[maskY][maskX] > 0.5 ? 1 : 0;
+                    } else if (Array.isArray(maskData[0])) {
+                        // 1D array format
+                        maskValue = maskData[maskY * TARGET_SIZE + maskX] > 0.5 ? 1 : 0;
                     }
+                    
+                    // Set alpha channel
+                    const idx = (y * img.width + x) * 4 + 3;
+                    imageData.data[idx] = maskValue * 255;
                 }
             }
             
@@ -223,7 +229,7 @@
             document.getElementById('download').style.display = 'inline-block';
             
             // Clean up
-            mask.dispose();
+            maskTensor.dispose();
         }
     </script>
 </body>
