@@ -1,8 +1,9 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>U²-Net Background Remover</title>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
+    <title>Fast U²-Net Background Remover</title>
+    <!-- Using TF.js 2.8.6 for better performance -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@2.8.6/dist/tf.min.js"></script>
     <style>
         body { font-family: Arial, sans-serif; max-width: 1000px; margin: 0 auto; padding: 20px; }
         #upload-container { margin: 20px 0; padding: 30px; border: 2px dashed #ccc; text-align: center; background: #f9f9f9; }
@@ -15,10 +16,12 @@
         #progress { width: 100%; margin: 10px 0; display: none; }
         #cancel { display: none; background: #f44336; margin-left: 10px; }
         .button-group { display: flex; justify-content: center; }
+        .spinner { display: none; margin: 10px auto; border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
-    <h1>U²-Net Background Remover</h1>
+    <h1>Fast Background Remover</h1>
     <div id="upload-container">
         <input type="file" id="upload" accept="image/*" style="display: none;">
         <div class="button-group">
@@ -28,8 +31,9 @@
         <p>or drag and drop image here</p>
     </div>
     
-    <div id="status">Loading model (this may take a minute)...</div>
+    <div id="status">Loading model...</div>
     <progress id="progress" value="0" max="100"></progress>
+    <div class="spinner" id="spinner"></div>
     
     <div class="container">
         <div class="column">
@@ -42,16 +46,23 @@
         </div>
     </div>
     
-    <a id="download" href="#" download="background-removed.png">Download Result</a>
+    <a id="download" href="#" download="no-bg.png">Download Result</a>
 
     <script>
         // Configuration
         const MODEL_PATH = 'model/model.json';
         const TARGET_SIZE = 320; // U²-Net processing size
-        const MAX_INPUT_DIMENSION = 1024; // Max size for input images
+        const MAX_INPUT_DIMENSION = 512; // Reduced from 1024 for better performance
+        
+        // Performance optimizations
+        tf.ENV.set('WEBGL_PACK', false);
+        tf.ENV.set('WEBGL_LAZILY_UNPACK', true);
+        tf.ENV.set('WEBGL_FORCE_F16_TEXTURES', true);
+        
         let model = null;
         let isProcessing = false;
         let processingCanceled = false;
+        let progressInterval;
         
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
@@ -93,9 +104,10 @@
             if (isProcessing) {
                 processingCanceled = true;
                 isProcessing = false;
+                clearInterval(progressInterval);
                 document.getElementById('status').textContent = "Processing canceled";
                 document.getElementById('cancel').style.display = 'none';
-                // Force cleanup
+                document.getElementById('spinner').style.display = 'none';
                 tf.disposeVariables();
             }
         }
@@ -110,7 +122,7 @@
                 const response = await fetch(MODEL_PATH);
                 if (!response.ok) throw new Error("Model files not found. Check your model path.");
                 
-                // Load the model with progress tracking
+                // Load the model
                 model = await tf.loadGraphModel(MODEL_PATH, {
                     onProgress: (progress) => {
                         const percent = Math.round(progress * 100);
@@ -131,7 +143,7 @@
             }
         }
         
-        // Warm up the model for faster first inference
+        // Warm up the model
         async function warmupModel() {
             const warmupTensor = tf.zeros([1, TARGET_SIZE, TARGET_SIZE, 3]);
             await model.executeAsync(warmupTensor);
@@ -148,39 +160,52 @@
             isProcessing = true;
             processingCanceled = false;
             document.getElementById('cancel').style.display = 'inline-block';
+            document.getElementById('spinner').style.display = 'block';
+            
+            // Start fake progress (better UX)
+            let fakeProgress = 0;
+            progressInterval = setInterval(() => {
+                fakeProgress += Math.random() * 5;
+                document.getElementById('progress').value = Math.min(fakeProgress, 90);
+            }, 300);
             
             try {
-                document.getElementById('status').textContent = "Processing...";
+                document.getElementById('status').textContent = "Preparing image...";
+                document.getElementById('progress').style.display = 'block';
                 
-                // Load and optionally resize the image
+                // 1. Load and resize image if needed
                 const { img, originalWidth, originalHeight } = await loadAndResizeImage(file);
+                if (processingCanceled) return;
                 
                 // Show original image
                 document.getElementById('original').src = img.src;
                 document.getElementById('original').style.display = 'block';
                 
-                // Process with model
+                // 2. Generate mask
+                document.getElementById('status').textContent = "Removing background...";
                 const mask = await generateMask(img);
                 if (processingCanceled) return;
                 
-                // Apply mask to original image
+                // 3. Apply mask
                 await applyMask(img, mask, originalWidth, originalHeight);
                 
                 document.getElementById('status').textContent = "Done!";
+                document.getElementById('progress').value = 100;
             } catch (error) {
                 if (!processingCanceled) {
                     document.getElementById('status').textContent = `Error: ${error.message}`;
                     console.error("Processing error:", error);
                 }
             } finally {
+                clearInterval(progressInterval);
                 isProcessing = false;
                 document.getElementById('cancel').style.display = 'none';
-                // Force garbage collection
-                await tf.nextFrame();
+                document.getElementById('spinner').style.display = 'none';
+                tf.disposeVariables();
             }
         }
         
-        // Load and optionally resize the image
+        // Load and resize image if needed
         async function loadAndResizeImage(file) {
             return new Promise((resolve, reject) => {
                 const img = new Image();
@@ -188,7 +213,7 @@
                     let originalWidth = img.width;
                     let originalHeight = img.height;
                     
-                    // Downscale very large images to improve performance
+                    // Downscale large images
                     if (img.width > MAX_INPUT_DIMENSION || img.height > MAX_INPUT_DIMENSION) {
                         const ratio = Math.min(
                             MAX_INPUT_DIMENSION / img.width, 
@@ -200,8 +225,8 @@
                         const ctx = canvas.getContext('2d');
                         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
                         
-                        // Replace the image with the resized version
-                        img.src = canvas.toDataURL('image/jpeg');
+                        // Replace with resized version
+                        img.src = canvas.toDataURL('image/jpeg', 0.9); // Quality 90%
                         await new Promise(resolve => img.onload = resolve);
                     }
                     
@@ -212,112 +237,88 @@
             });
         }
         
-        // Generate mask using U²-Net
+        // Generate mask using U²-Net (optimized)
         async function generateMask(img) {
             // Create input tensor
-            const { tensor, canvas } = await prepareInputTensor(img);
+            const input = tf.tidy(() => {
+                const tensor = tf.browser.fromPixels(img)
+                    .resizeBilinear([TARGET_SIZE, TARGET_SIZE])
+                    .toFloat()
+                    .div(255)
+                    .expandDims();
+                return tensor;
+            });
             
-            // Execute model
+            // Execute model (synchronous for better performance)
             console.time('Model Inference');
-            const output = await model.executeAsync(tensor);
+            const output = await model.executeAsync(input);
             console.timeEnd('Model Inference');
             
             // Process output
             let maskTensor = output;
             if (Array.isArray(output)) {
-                maskTensor = output[0]; // Take first output if multiple
+                maskTensor = output[0]; // Take first output
             }
             
-            // Convert to array
+            // Convert to array and clean up
             const maskArray = await maskTensor.array();
-            
-            // Clean up
-            tensor.dispose();
+            input.dispose();
             if (maskTensor !== output) maskTensor.dispose();
-            if (Array.isArray(output)) {
-                output.forEach(t => t.dispose());
-            }
+            if (Array.isArray(output)) output.forEach(t => t.dispose());
             
             return maskArray;
         }
         
-        // Prepare input tensor for the model
-        async function prepareInputTensor(img) {
-            const canvas = document.createElement('canvas');
-            canvas.width = TARGET_SIZE;
-            canvas.height = TARGET_SIZE;
-            const ctx = canvas.getContext('2d');
-            
-            // Fill with black background
-            ctx.fillStyle = 'black';
-            ctx.fillRect(0, 0, TARGET_SIZE, TARGET_SIZE);
-            
-            // Calculate dimensions to maintain aspect ratio
-            const ratio = Math.min(
-                TARGET_SIZE / img.width, 
-                TARGET_SIZE / img.height
-            );
-            const width = Math.floor(img.width * ratio);
-            const height = Math.floor(img.height * ratio);
-            const offsetX = (TARGET_SIZE - width) / 2;
-            const offsetY = (TARGET_SIZE - height) / 2;
-            
-            // Draw centered image
-            ctx.drawImage(img, offsetX, offsetY, width, height);
-            
-            // Create tensor
-            const tensor = tf.tidy(() => {
-                return tf.browser.fromPixels(canvas)
-                    .toFloat()
-                    .div(255)
-                    .expandDims();
-            });
-            
-            return { tensor, canvas, offsetX, offsetY, width, height };
-        }
-        
-        // Apply mask to original image
+        // Apply mask to original image (optimized)
         async function applyMask(img, maskArray, originalWidth, originalHeight) {
             const resultCanvas = document.getElementById('result');
             resultCanvas.width = originalWidth;
             resultCanvas.height = originalHeight;
             const resultCtx = resultCanvas.getContext('2d');
             
-            // Draw original image (or resized version)
+            // 1. Draw original image
             resultCtx.drawImage(img, 0, 0, originalWidth, originalHeight);
             
-            // Create mask canvas
+            // 2. Create mask canvas
             const maskCanvas = document.createElement('canvas');
             maskCanvas.width = TARGET_SIZE;
             maskCanvas.height = TARGET_SIZE;
             const maskCtx = maskCanvas.getContext('2d');
             
-            // Draw the mask
+            // 3. Draw mask (optimized)
             const maskImageData = maskCtx.createImageData(TARGET_SIZE, TARGET_SIZE);
-            for (let y = 0; y < TARGET_SIZE; y++) {
-                for (let x = 0; x < TARGET_SIZE; x++) {
-                    const value = Math.round(maskArray[y][x] * 255);
-                    const idx = (y * TARGET_SIZE + x) * 4;
-                    maskImageData.data[idx] = value;
-                    maskImageData.data[idx + 1] = value;
-                    maskImageData.data[idx + 2] = value;
-                    maskImageData.data[idx + 3] = 255;
-                }
+            for (let i = 0; i < TARGET_SIZE * TARGET_SIZE; i++) {
+                const y = Math.floor(i / TARGET_SIZE);
+                const x = i % TARGET_SIZE;
+                const value = Math.round(maskArray[y][x] * 255);
+                const idx = i * 4;
+                maskImageData.data[idx] = value;
+                maskImageData.data[idx + 1] = value;
+                maskImageData.data[idx + 2] = value;
+                maskImageData.data[idx + 3] = 255;
             }
             maskCtx.putImageData(maskImageData, 0, 0);
             
-            // Apply mask using compositing
+            // 4. Apply mask using compositing (fastest method)
             resultCtx.globalCompositeOperation = 'destination-in';
-            resultCtx.drawImage(maskCanvas, 
+            resultCtx.drawImage(
+                maskCanvas, 
                 0, 0, TARGET_SIZE, TARGET_SIZE,
                 0, 0, originalWidth, originalHeight
             );
             resultCtx.globalCompositeOperation = 'source-over';
             
-            // Display result
+            // 5. Show result
             resultCanvas.style.display = 'block';
             document.getElementById('download').href = resultCanvas.toDataURL('image/png');
             document.getElementById('download').style.display = 'inline-block';
+            
+            // Force WebGL context reset
+            const gl = tf.backend().getGPGPUContext().gl;
+            const loseContextExt = gl.getExtension('WEBGL_lose_context');
+            if (loseContextExt) {
+                loseContextExt.loseContext();
+            }
         }
     </script>
 </body>
