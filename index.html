@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Optimized Background Remover</title>
+    <title>Reliable Background Remover</title>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
     <style>
         body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
@@ -77,7 +77,7 @@
             });
         }
         
-        // Load TensorFlow.js model with memory management
+        // Load TensorFlow.js model
         async function loadModel() {
             try {
                 document.getElementById('status').textContent = "Loading model...";
@@ -104,7 +104,7 @@
             }
         }
         
-        // Process uploaded file with memory management
+        // Process uploaded file
         function processFile(file) {
             if (!file.type.match('image.*')) {
                 document.getElementById('status').textContent = "Please select an image file";
@@ -124,27 +124,8 @@
                         // Create working canvas
                         const { canvas, offsetX, offsetY, width, height } = createPaddedCanvas(img);
                         
-                        // Process with model - with memory cleanup
-                        const maskData = await tf.tidy(() => {
-                            const tensor = tf.browser.fromPixels(canvas)
-                                .toFloat()
-                                .div(255)
-                                .expandDims();
-                            
-                            // Execute model and get data
-                            const output = model.execute(tensor);
-                            
-                            // Handle different output formats
-                            let mask;
-                            if (output.shape && output.shape.length === 4) {
-                                mask = output.squeeze([0]); // Remove batch dimension
-                            } else {
-                                mask = output;
-                            }
-                            
-                            // Convert to data before disposing
-                            return mask.dataSync();
-                        });
+                        // Process with model
+                        const maskData = await processWithModel(canvas);
                         
                         // Create final result
                         await createFinalResult(img, maskData, offsetX, offsetY, width, height);
@@ -153,9 +134,7 @@
                     } catch (error) {
                         document.getElementById('status').textContent = `Error: ${error.message}`;
                         console.error("Processing error:", error);
-                        
-                        // Force garbage collection
-                        await tf.nextFrame();
+                        await tf.nextFrame(); // Help with garbage collection
                     }
                 } else {
                     document.getElementById('status').textContent = "Model not loaded yet";
@@ -191,8 +170,61 @@
             return { canvas, offsetX, offsetY, width, height };
         }
         
-        // Create final result using mask data
-        async function createFinalResult(img, maskData, offsetX, offsetY, width, height) {
+        // Process image with model - completely fixed version
+        async function processWithModel(canvas) {
+            // Create input tensor
+            const tensor = tf.tidy(() => {
+                return tf.browser.fromPixels(canvas)
+                    .toFloat()
+                    .div(255)
+                    .expandDims();
+            });
+            
+            try {
+                // Execute model
+                const output = await model.executeAsync(tensor);
+                
+                // Convert output to array (fixed version)
+                const maskArray = await processModelOutput(output);
+                
+                return maskArray;
+            } finally {
+                // Clean up tensors
+                tensor.dispose();
+                await tf.nextFrame();
+            }
+        }
+        
+        // Process model output - handles all cases
+        async function processModelOutput(output) {
+            // Get the actual mask tensor (handles nested outputs)
+            let maskTensor = output;
+            if (Array.isArray(output)) {
+                // Some models return multiple outputs, we want the first one
+                maskTensor = output[0];
+            }
+            
+            // Remove batch dimension if needed
+            if (maskTensor.shape.length === 4) {
+                maskTensor = maskTensor.squeeze([0]);
+            }
+            
+            // Convert to 2D array
+            const maskArray = await maskTensor.array();
+            
+            // Clean up
+            if (maskTensor !== output) maskTensor.dispose();
+            if (Array.isArray(output)) {
+                output.forEach(t => t.dispose());
+            } else {
+                output.dispose();
+            }
+            
+            return maskArray;
+        }
+        
+        // Create final result
+        async function createFinalResult(img, maskArray, offsetX, offsetY, width, height) {
             const resultCanvas = document.getElementById('result');
             resultCanvas.width = img.width;
             resultCanvas.height = img.height;
@@ -215,8 +247,15 @@
                     const maskX = Math.min(TARGET_SIZE - 1, Math.floor((x / img.width) * width / scaleX));
                     const maskY = Math.min(TARGET_SIZE - 1, Math.floor((y / img.height) * height / scaleY));
                     
-                    // Get mask value (using dataSync() array)
-                    const maskValue = maskData[maskY * TARGET_SIZE + maskX] > 0.5 ? 1 : 0;
+                    // Get mask value (handles both 1D and 2D arrays)
+                    let maskValue;
+                    if (Array.isArray(maskArray[0])) {
+                        // 2D array format
+                        maskValue = maskArray[maskY][maskX] > 0.5 ? 1 : 0;
+                    } else {
+                        // 1D array format
+                        maskValue = maskArray[maskY * TARGET_SIZE + maskX] > 0.5 ? 1 : 0;
+                    }
                     
                     // Set alpha channel
                     const idx = (y * img.width + x) * 4 + 3;
@@ -231,9 +270,6 @@
             // Set download link
             document.getElementById('download').href = resultCanvas.toDataURL('image/png');
             document.getElementById('download').style.display = 'inline-block';
-            
-            // Force garbage collection
-            await tf.nextFrame();
         }
     </script>
 </body>
