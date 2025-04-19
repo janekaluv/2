@@ -1,134 +1,99 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Unlimited Background Remover</title>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
+    <title>Background Remover</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-            text-align: center;
-        }
-        #upload-container {
-            margin: 20px 0;
-            padding: 20px;
-            border: 2px dashed #ccc;
-            border-radius: 5px;
-        }
-        #original-container, #result-container {
-            display: inline-block;
-            margin: 10px;
-            vertical-align: top;
-        }
-        #original, #result {
-            max-width: 100%;
-            max-height: 400px;
-            display: none;
-            border: 1px solid #eee;
-        }
-        #download {
-            margin: 20px auto;
-            padding: 10px 20px;
-            background: #4CAF50;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            display: none;
-            text-decoration: none;
-        }
-        #status {
-            margin: 10px 0;
-            color: #666;
-            min-height: 20px;
-        }
-        #progress {
-            width: 100%;
-            margin: 10px 0;
-            display: none;
-        }
-        h1 {
-            color: #333;
-        }
-        .container {
-            display: flex;
-            justify-content: center;
-            flex-wrap: wrap;
-        }
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        #upload-container { margin: 20px 0; padding: 20px; border: 2px dashed #ccc; text-align: center; }
+        #original, #result { max-width: 100%; margin-top: 20px; display: none; }
+        #download { margin-top: 10px; display: none; padding: 8px 16px; background: #4CAF50; color: white; text-decoration: none; }
+        #status { margin: 10px 0; min-height: 24px; }
+        .container { display: flex; gap: 20px; justify-content: center; }
+        .column { flex: 1; }
     </style>
 </head>
 <body>
     <h1>Unlimited Background Remover</h1>
-    <p>100% browser-based - no image uploads, no limits!</p>
-    
     <div id="upload-container">
         <input type="file" id="upload" accept="image/*" style="display: none;">
         <button onclick="document.getElementById('upload').click()">Select Image</button>
         <p>or drag and drop image here</p>
     </div>
     
-    <div id="status">Loading AI model (this may take a minute)...</div>
-    <progress id="progress" value="0" max="100"></progress>
+    <div id="status">Loading model...</div>
     
     <div class="container">
-        <div id="original-container">
+        <div class="column">
             <h3>Original</h3>
             <img id="original">
         </div>
-        <div id="result-container">
+        <div class="column">
             <h3>Result</h3>
             <canvas id="result"></canvas>
         </div>
     </div>
     
-    <a id="download" href="#">Download Result</a>
+    <a id="download" href="#" download="no-bg.png">Download Result</a>
 
     <script>
-        // Model variables
+        // Model configuration
+        const MODEL_PATH = 'model/model.json';
+        const TARGET_SIZE = 320; // U²-Net expects 320x320 input
+        
+        // Global variables
         let model = null;
-        const MODEL_PATH = 'model/model.json'; // Path to your TFJS model
         
-        // Initialize when page loads
-        document.addEventListener('DOMContentLoaded', function() {
-            // Set up drag and drop
-            const uploadContainer = document.getElementById('upload-container');
-            uploadContainer.addEventListener('dragover', handleDragOver);
-            uploadContainer.addEventListener('drop', handleDrop);
-            
-            // Load model
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            setupDragDrop();
             loadModel();
-        });
-        
-        // Handle drag over
-        function handleDragOver(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            e.dataTransfer.dropEffect = 'copy';
-            document.getElementById('upload-container').style.borderColor = '#4CAF50';
-        }
-        
-        // Handle drop
-        function handleDrop(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            document.getElementById('upload-container').style.borderColor = '#ccc';
             
-            const files = e.dataTransfer.files;
-            if (files.length && files[0].type.match('image.*')) {
-                processFile(files[0]);
+            document.getElementById('upload').addEventListener('change', (e) => {
+                if (e.target.files[0]) processFile(e.target.files[0]);
+            });
+        });
+        
+        // Setup drag and drop
+        function setupDragDrop() {
+            const container = document.getElementById('upload-container');
+            
+            container.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                container.style.borderColor = '#4CAF50';
+            });
+            
+            container.addEventListener('dragleave', () => {
+                container.style.borderColor = '#ccc';
+            });
+            
+            container.addEventListener('drop', (e) => {
+                e.preventDefault();
+                container.style.borderColor = '#ccc';
+                if (e.dataTransfer.files[0]) processFile(e.dataTransfer.files[0]);
+            });
+        }
+        
+        // Load TensorFlow.js model
+        async function loadModel() {
+            try {
+                document.getElementById('status').textContent = "Loading model (≈30MB)...";
+                
+                // Verify model exists
+                const response = await fetch(MODEL_PATH);
+                if (!response.ok) throw new Error("Model files not found");
+                
+                // Load the model
+                model = await tf.loadGraphModel(MODEL_PATH);
+                document.getElementById('status').textContent = "Model loaded! Select an image";
+                console.log("Model loaded successfully:", model);
+            } catch (error) {
+                document.getElementById('status').textContent = `Error loading model: ${error.message}`;
+                console.error("Model loading failed:", error);
             }
         }
         
-        // Handle file selection
-        document.getElementById('upload').addEventListener('change', function(e) {
-            if (e.target.files.length) {
-                processFile(e.target.files[0]);
-            }
-        });
-        
-        // Process selected file
+        // Process uploaded file
         function processFile(file) {
             if (!file.type.match('image.*')) {
                 document.getElementById('status').textContent = "Please select an image file";
@@ -136,116 +101,88 @@
             }
             
             const img = new Image();
-            img.onload = function() {
+            img.onload = () => {
                 if (model) {
-                    processImage(img);
+                    processImage(img).catch(error => {
+                        document.getElementById('status').textContent = `Error: ${error.message}`;
+                        console.error("Processing error:", error);
+                    });
                 } else {
-                    document.getElementById('status').textContent = "Model not loaded yet, please wait";
+                    document.getElementById('status').textContent = "Model not loaded yet";
                 }
             };
             img.src = URL.createObjectURL(file);
         }
         
-        // Load TFJS model
-        async function loadModel() {
-            document.getElementById('status').textContent = "Loading AI model...";
-            document.getElementById('progress').style.display = 'block';
-            
-            try {
-                // First verify the model files exist
-                const test = await fetch(MODEL_PATH);
-                if (!test.ok) throw new Error(`Cannot find model at ${MODEL_PATH}`);
-                
-                // Load the model with progress tracking
-                model = await tf.loadGraphModel(MODEL_PATH, {
-                    onProgress: (progress) => {
-                        const percent = Math.round(progress * 100);
-                        document.getElementById('progress').value = percent;
-                        document.getElementById('status').textContent = 
-                            `Downloading model: ${percent}% (this may take a few minutes)`;
-                    }
-                });
-                
-                document.getElementById('progress').style.display = 'none';
-                document.getElementById('status').textContent = "Model loaded! Select an image";
-                console.log("Model loaded successfully");
-            } catch (e) {
-                document.getElementById('status').innerHTML = 
-                    `Failed to load model. Please check:<br>
-                    1. The 'model' folder exists in your GitHub repo<br>
-                    2. It contains model.json and .bin files<br>
-                    3. Files are properly committed`;
-                console.error("Model loading failed:", e);
-            }
-        }
-        
-        // Process image with background removal
-        async function processImage(image) {
+        // Main processing function
+        async function processImage(img) {
             document.getElementById('status').textContent = "Processing...";
             
             try {
-                // Target size for U²-Net (must be 320x320)
-                const targetSize = 320;
+                // Create square canvas with original image centered
+                const { canvas, offsetX, offsetY, width, height } = createPaddedCanvas(img);
                 
-                // Create padded canvas (320x320)
-                const paddedCanvas = document.createElement('canvas');
-                paddedCanvas.width = targetSize;
-                paddedCanvas.height = targetSize;
-                const paddedCtx = paddedCanvas.getContext('2d');
-                
-                // Fill with black background
-                paddedCtx.fillStyle = 'black';
-                paddedCtx.fillRect(0, 0, targetSize, targetSize);
-                
-                // Calculate dimensions to maintain aspect ratio
-                const ratio = Math.min(
-                    targetSize / image.width, 
-                    targetSize / image.height
-                );
-                const newWidth = Math.floor(image.width * ratio);
-                const newHeight = Math.floor(image.height * ratio);
-                
-                // Center the image on the canvas
-                const offsetX = (targetSize - newWidth) / 2;
-                const offsetY = (targetSize - newHeight) / 2;
-                
-                // Draw the image centered
-                paddedCtx.drawImage(image, offsetX, offsetY, newWidth, newHeight);
-                
-                // Show original (padded) image
-                document.getElementById('original').src = paddedCanvas.toDataURL();
+                // Show padded original
+                document.getElementById('original').src = canvas.toDataURL();
                 document.getElementById('original').style.display = 'block';
                 
                 // Convert to tensor and normalize
-                const tensor = tf.browser.fromPixels(paddedCanvas)
-                    .toFloat()
-                    .div(tf.scalar(255))  // Normalize to [0,1]
-                    .expandDims();        // Add batch dimension
+                const tensor = tf.tidy(() => {
+                    return tf.browser.fromPixels(canvas)
+                        .toFloat()
+                        .div(255)
+                        .expandDims();
+                });
                 
-                // Run prediction - MODIFIED THIS PART
-                const prediction = await model.execute(tensor);
-                const mask = prediction.squeeze ? prediction.squeeze() : tf.squeeze(prediction);
+                // Execute model - IMPORTANT: Use the correct input name
+                const output = await model.executeAsync(tensor, 'Identity');
+                const mask = output.squeeze();
                 
                 // Create final result
-                await createResult(image, paddedCanvas, mask, offsetX, offsetY, newWidth, newHeight);
+                await applyMask(canvas, mask, offsetX, offsetY, width, height);
                 
-                // Clean up - ADDED MORE DISPOSE CALLS
+                // Clean up
                 tensor.dispose();
-                if (prediction !== mask) prediction.dispose();
+                output.dispose();
                 mask.dispose();
-                tf.disposeVariables();
                 
                 document.getElementById('status').textContent = "Done!";
-            } catch (e) {
-                document.getElementById('status').textContent = "Error during processing: " + e.message;
-                console.error("Processing error:", e);
-                // Force garbage collection
+            } catch (error) {
+                // Force memory cleanup
                 await tf.nextFrame();
+                throw error;
             }
         }
         
-        // Create final result image
-        async function createResult(originalImage, paddedCanvas, mask, offsetX, offsetY, width, height) {
+        // Create properly padded canvas
+        function createPaddedCanvas(img) {
+            const canvas = document.createElement('canvas');
+            canvas.width = TARGET_SIZE;
+            canvas.height = TARGET_SIZE;
+            const ctx = canvas.getContext('2d');
+            
+            // Fill with black background
+            ctx.fillStyle = 'black';
+            ctx.fillRect(0, 0, TARGET_SIZE, TARGET_SIZE);
+            
+            // Calculate dimensions to maintain aspect ratio
+            const ratio = Math.min(
+                TARGET_SIZE / img.width, 
+                TARGET_SIZE / img.height
+            );
+            const width = Math.floor(img.width * ratio);
+            const height = Math.floor(img.height * ratio);
+            const offsetX = (TARGET_SIZE - width) / 2;
+            const offsetY = (TARGET_SIZE - height) / 2;
+            
+            // Draw centered image
+            ctx.drawImage(img, offsetX, offsetY, width, height);
+            
+            return { canvas, offsetX, offsetY, width, height };
+        }
+        
+        // Apply mask to create final result
+        async function applyMask(paddedCanvas, mask, offsetX, offsetY, width, height) {
             const resultCanvas = document.getElementById('result');
             resultCanvas.width = width;
             resultCanvas.height = height;
@@ -253,41 +190,34 @@
             
             // Get mask data
             const maskData = await mask.array();
-            const paddedImageData = paddedCanvas.getContext('2d').getImageData(0, 0, 320, 320);
-            
-            // Create new image data with original dimensions
-            const resultImageData = resultCtx.createImageData(width, height);
+            const imageData = paddedCanvas.getContext('2d').getImageData(0, 0, TARGET_SIZE, TARGET_SIZE);
+            const resultData = resultCtx.createImageData(width, height);
             
             // Process each pixel
             for (let y = 0; y < height; y++) {
                 for (let x = 0; x < width; x++) {
-                    const paddedX = Math.floor(offsetX) + x;
-                    const paddedY = Math.floor(offsetY) + y;
-                    const resultIdx = (y * width + x) * 4;
-                    const paddedIdx = (paddedY * 320 + paddedX) * 4;
+                    const srcX = Math.floor(offsetX) + x;
+                    const srcY = Math.floor(offsetY) + y;
+                    const srcIdx = (srcY * TARGET_SIZE + srcX) * 4;
+                    const dstIdx = (y * width + x) * 4;
                     
-                    // Copy RGB from original
-                    resultImageData.data[resultIdx] = paddedImageData.data[paddedIdx];
-                    resultImageData.data[resultIdx+1] = paddedImageData.data[paddedIdx+1];
-                    resultImageData.data[resultIdx+2] = paddedImageData.data[paddedIdx+2];
+                    // Copy RGB channels
+                    resultData.data[dstIdx] = imageData.data[srcIdx];
+                    resultData.data[dstIdx+1] = imageData.data[srcIdx+1];
+                    resultData.data[dstIdx+2] = imageData.data[srcIdx+2];
                     
                     // Apply mask (threshold at 0.5)
-                    const maskValue = maskData[paddedY][paddedX];
-                    resultImageData.data[resultIdx+3] = maskValue > 0.5 ? 255 : 0;
+                    resultData.data[dstIdx+3] = maskData[srcY][srcX] > 0.5 ? 255 : 0;
                 }
             }
             
-            // Apply to canvas
-            resultCtx.putImageData(resultImageData, 0, 0);
+            // Apply to result canvas
+            resultCtx.putImageData(resultData, 0, 0);
             resultCanvas.style.display = 'block';
             
             // Set download link
-            const downloadLink = document.getElementById('download');
-            downloadLink.href = resultCanvas.toDataURL('image/png');
-            downloadLink.style.display = 'inline-block';
-            
-            // Force garbage collection
-            await tf.nextFrame();
+            document.getElementById('download').href = resultCanvas.toDataURL('image/png');
+            document.getElementById('download').style.display = 'inline-block';
         }
     </script>
 </body>
