@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Unlimited Background Remover</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        #original, #result { max-width: 100%; margin-top: 20px; display: none; }
+        #download { margin-top: 10px; display: none; }
+        .container { display: flex; gap: 20px; }
+        .loading { color: #666; font-style: italic; }
+        #progress { width: 100%; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Unlimited Background Remover</h1>
+    <p>Works 100% in your browser - no uploads, no limits!</p>
+    
+    <input type="file" id="upload" accept="image/*">
+    <div id="status" class="loading">Loading AI model...</div>
+    <progress id="progress" value="0" max="100" style="display: none;"></progress>
+    
+    <div class="container">
+        <div>
+            <h3>Original</h3>
+            <img id="original">
+        </div>
+        <div>
+            <h3>Result</h3>
+            <canvas id="result"></canvas>
+        </div>
+    </div>
+    
+    <a id="download" href="#" download="no-bg.png">Download Image</a>
+
+    <script>
+        // Model variables
+        let model = null;
+        const MODEL_PATH = '/model/model.json'; // Path to your model.json
+        
+        // Load model with progress tracking
+        async function loadModel() {
+            document.getElementById('status').textContent = "Loading AI model...";
+            document.getElementById('progress').style.display = 'block';
+            
+            try {
+                model = await tf.loadGraphModel(MODEL_PATH, {
+                    onProgress: (progress) => {
+                        const percent = Math.round(progress * 100);
+                        document.getElementById('progress').value = percent;
+                        document.getElementById('status').textContent = 
+                            `Downloading model: ${percent}% (≈30MB total)`;
+                    }
+                });
+                
+                document.getElementById('progress').style.display = 'none';
+                document.getElementById('status').textContent = "Ready! Upload an image";
+                console.log("Model loaded successfully");
+                return model;
+            } catch (e) {
+                document.getElementById('status').textContent = "Error loading model: " + e.message;
+                console.error("Model loading failed:", e);
+                throw e;
+            }
+        }
+        
+        // Initialize model when page loads
+        let modelPromise = loadModel();
+        
+        // Process image when uploaded
+        document.getElementById('upload').addEventListener('change', async function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            const img = new Image();
+            img.onload = async function() {
+                try {
+                    const model = await modelPromise;
+                    await processImage(img, model);
+                } catch (e) {
+                    document.getElementById('status').textContent = "Error: " + e.message;
+                    console.error("Processing error:", e);
+                }
+            };
+            img.src = URL.createObjectURL(file);
+        });
+        
+        async function processImage(image, model) {
+            document.getElementById('status').textContent = "Processing...";
+            
+            // Resize if needed (U²-Net typically expects 320x320)
+            const targetSize = 320;
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            
+            // Maintain aspect ratio
+            let width = image.width;
+            let height = image.height;
+            if (width > height) {
+                height = height * (targetSize / width);
+                width = targetSize;
+            } else {
+                width = width * (targetSize / height);
+                height = targetSize;
+            }
+            
+            canvas.width = width;
+            canvas.height = height;
+            ctx.drawImage(image, 0, 0, width, height);
+            
+            // Show original
+            document.getElementById('original').src = canvas.toDataURL();
+            document.getElementById('original').style.display = 'block';
+            
+            // Preprocess image for model
+            const tensor = tf.browser.fromPixels(canvas)
+                .toFloat()
+                .div(tf.scalar(255))  // Normalize to [0,1]
+                .expandDims();
+            
+            // Run prediction
+            const prediction = await model.predict(tensor);
+            const mask = prediction.squeeze();
+            
+            // Create mask visualization
+            await visualizeMask(canvas, mask);
+            
+            // Clean up
+            tensor.dispose();
+            prediction.dispose();
+            mask.dispose();
+        }
+        
+        async function visualizeMask(originalCanvas, mask) {
+            const resultCanvas = document.getElementById('result');
+            resultCanvas.width = originalCanvas.width;
+            resultCanvas.height = originalCanvas.height;
+            const resultCtx = resultCanvas.getContext('2d');
+            
+            // Draw original image
+            resultCtx.drawImage(originalCanvas, 0, 0);
+            
+            // Get mask data
+            const maskData = await mask.array();
+            const imageData = resultCtx.getImageData(0, 0, resultCanvas.width, resultCanvas.height);
+            
+            // Apply mask (threshold at 0.5)
+            for (let y = 0; y < resultCanvas.height; y++) {
+                for (let x = 0; x < resultCanvas.width; x++) {
+                    const idx = (y * resultCanvas.width + x) * 4;
+                    const maskValue = maskData[y][x];
+                    
+                    // Set alpha channel based on mask
+                    imageData.data[idx + 3] = maskValue > 0.5 ? 255 : 0;
+                }
+            }
+            
+            resultCtx.putImageData(imageData, 0, 0);
+            resultCanvas.style.display = 'block';
+            
+            // Set download link
+            document.getElementById('download').href = resultCanvas.toDataURL('image/png');
+            document.getElementById('download').style.display = 'inline-block';
+            document.getElementById('status').textContent = "Done! Right-click to save";
+        }
+    </script>
+</body>
+</html>
