@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Perfect Background Remover</title>
+    <title>Flawless Background Remover</title>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
     <style>
         body { font-family: Arial, sans-serif; max-width: 1000px; margin: 0 auto; padding: 20px; }
@@ -13,22 +13,14 @@
         .column { flex: 1; text-align: center; }
         button { padding: 12px 24px; background: #4285f4; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
         #progress { width: 100%; margin: 10px 0; display: none; }
-        .quality-options { margin: 20px 0; }
-        .quality-options label { margin-right: 15px; }
     </style>
 </head>
 <body>
-    <h1>Perfect Quality Background Remover</h1>
+    <h1>Flawless Background Remover</h1>
     <div id="upload-container">
         <input type="file" id="upload" accept="image/*" style="display: none;">
         <button onclick="document.getElementById('upload').click()">Select Image</button>
         <p>or drag and drop image here</p>
-        
-        <div class="quality-options">
-            <h3>Processing Quality</h3>
-            <label><input type="radio" name="quality" value="fast" checked> Fast</label>
-            <label><input type="radio" name="quality" value="quality"> High Quality</label>
-        </div>
     </div>
     
     <div id="status">Loading model (this may take a minute)...</div>
@@ -45,15 +37,12 @@
         </div>
     </div>
     
-    <a id="download" href="#" download="perfect-bg-removed.png">Download Perfect Result</a>
+    <a id="download" href="#" download="flawless-bg-removed.png">Download Result</a>
 
     <script>
         // Configuration
         const MODEL_PATH = 'model/model.json';
-        const BASE_SIZE = 320; // U²-Net base size
-        let currentQuality = 'fast';
-        
-        // Global variables
+        const PROCESSING_SIZE = 320; // U²-Net processing size
         let model = null;
         
         // Initialize
@@ -63,13 +52,6 @@
             
             document.getElementById('upload').addEventListener('change', (e) => {
                 if (e.target.files[0]) processFile(e.target.files[0]);
-            });
-            
-            // Quality setting change
-            document.querySelectorAll('input[name="quality"]').forEach(radio => {
-                radio.addEventListener('change', () => {
-                    currentQuality = radio.value;
-                });
             });
         });
         
@@ -131,15 +113,28 @@
             }
             
             const img = new Image();
-            img.onload = () => {
+            img.onload = async () => {
                 if (model) {
-                    document.getElementById('status').textContent = "Processing image...";
-                    
-                    // Process based on quality setting
-                    if (currentQuality === 'quality') {
-                        processHighQuality(img);
-                    } else {
-                        processFastQuality(img);
+                    try {
+                        document.getElementById('status').textContent = "Processing...";
+                        
+                        // Show original image
+                        document.getElementById('original').src = img.src;
+                        document.getElementById('original').style.display = 'block';
+                        
+                        // Create processing canvas (maintains aspect ratio)
+                        const { canvas, offsetX, offsetY, procWidth, procHeight } = createProcessingCanvas(img);
+                        
+                        // Process with model
+                        const maskData = await processWithModel(canvas);
+                        
+                        // Create flawless result
+                        await createFlawlessResult(img, maskData, offsetX, offsetY, procWidth, procHeight);
+                        
+                        document.getElementById('status').textContent = "Done!";
+                    } catch (error) {
+                        document.getElementById('status').textContent = `Error: ${error.message}`;
+                        console.error("Processing error:", error);
                     }
                 } else {
                     document.getElementById('status').textContent = "Model not loaded yet";
@@ -148,118 +143,100 @@
             img.src = URL.createObjectURL(file);
         }
         
-        // Fast processing (maintains quality)
-        async function processFastQuality(img) {
-            try {
-                // Create square canvas with original image centered
-                const { canvas, offsetX, offsetY, width, height } = createPaddedCanvas(img, BASE_SIZE);
-                
-                // Show original (not padded)
-                document.getElementById('original').src = img.src;
-                document.getElementById('original').style.display = 'block';
-                
-                // Process with model
-                const mask = await generateMask(canvas);
-                
-                // Create final result with perfect quality
-                await createPerfectResult(img, mask, offsetX, offsetY, width, height);
-                
-                document.getElementById('status').textContent = "Processing complete!";
-            } catch (error) {
-                document.getElementById('status').textContent = `Error: ${error.message}`;
-                console.error("Processing error:", error);
-            }
-        }
-        
-        // High quality processing
-        async function processHighQuality(img) {
-            try {
-                // Create working canvas at higher resolution
-                const workSize = Math.min(1024, Math.max(img.width, img.height));
-                const { canvas, offsetX, offsetY, width, height } = createPaddedCanvas(img, workSize);
-                
-                // Show original
-                document.getElementById('original').src = img.src;
-                document.getElementById('original').style.display = 'block';
-                
-                // Create downscaled version for model processing
-                const modelCanvas = document.createElement('canvas');
-                modelCanvas.width = BASE_SIZE;
-                modelCanvas.height = BASE_SIZE;
-                const modelCtx = modelCanvas.getContext('2d');
-                modelCtx.drawImage(canvas, 0, 0, workSize, workSize, 0, 0, BASE_SIZE, BASE_SIZE);
-                
-                // Process with model
-                const smallMask = await generateMask(modelCanvas);
-                
-                // Upscale mask back to working size with edge refinement
-                const maskCanvas = document.createElement('canvas');
-                maskCanvas.width = workSize;
-                maskCanvas.height = workSize;
-                const maskCtx = maskCanvas.getContext('2d');
-                
-                // Use high-quality scaling
-                maskCtx.imageSmoothingEnabled = true;
-                maskCtx.drawImage(smallMask, 0, 0, BASE_SIZE, BASE_SIZE, 0, 0, workSize, workSize);
-                
-                // Get mask data
-                const maskData = maskCtx.getImageData(0, 0, workSize, workSize).data;
-                
-                // Create final high quality result
-                await createPerfectResult(img, { data: maskData, width: workSize, height: workSize }, 
-                                       offsetX, offsetY, width, height);
-                
-                document.getElementById('status').textContent = "High quality processing complete!";
-            } catch (error) {
-                document.getElementById('status').textContent = `Error: ${error.message}`;
-                console.error("Processing error:", error);
-            }
-        }
-        
-        // Create properly padded canvas
-        function createPaddedCanvas(img, targetSize) {
+        // Create processing canvas that maintains aspect ratio
+        function createProcessingCanvas(img) {
             const canvas = document.createElement('canvas');
-            canvas.width = targetSize;
-            canvas.height = targetSize;
             const ctx = canvas.getContext('2d');
-            
-            // Fill with black background
-            ctx.fillStyle = 'black';
-            ctx.fillRect(0, 0, targetSize, targetSize);
             
             // Calculate dimensions to maintain aspect ratio
             const ratio = Math.min(
-                targetSize / img.width, 
-                targetSize / img.height
+                PROCESSING_SIZE / img.width, 
+                PROCESSING_SIZE / img.height
             );
-            const width = Math.floor(img.width * ratio);
-            const height = Math.floor(img.height * ratio);
-            const offsetX = (targetSize - width) / 2;
-            const offsetY = (targetSize - height) / 2;
+            const procWidth = Math.floor(img.width * ratio);
+            const procHeight = Math.floor(img.height * ratio);
+            canvas.width = procWidth;
+            canvas.height = procHeight;
             
-            // Draw centered image
-            ctx.drawImage(img, offsetX, offsetY, width, height);
+            // Draw image (no stretching)
+            ctx.drawImage(img, 0, 0, procWidth, procHeight);
             
-            return { canvas, offsetX, offsetY, width, height };
+            // Create padded version for model (320x320)
+            const paddedCanvas = document.createElement('canvas');
+            paddedCanvas.width = PROCESSING_SIZE;
+            paddedCanvas.height = PROCESSING_SIZE;
+            const paddedCtx = paddedCanvas.getContext('2d');
+            
+            // Fill with black and center the image
+            paddedCtx.fillStyle = 'black';
+            paddedCtx.fillRect(0, 0, PROCESSING_SIZE, PROCESSING_SIZE);
+            const offsetX = (PROCESSING_SIZE - procWidth) / 2;
+            const offsetY = (PROCESSING_SIZE - procHeight) / 2;
+            paddedCtx.drawImage(canvas, offsetX, offsetY);
+            
+            return { 
+                canvas: paddedCanvas, 
+                offsetX, 
+                offsetY,
+                procWidth,
+                procHeight
+            };
         }
         
-        // Generate mask from image
-        async function generateMask(canvas) {
-            return tf.tidy(() => {
-                // Convert to tensor and normalize
-                const tensor = tf.browser.fromPixels(canvas)
+        // Process image with model
+        async function processWithModel(canvas) {
+            // Create input tensor
+            const tensor = tf.tidy(() => {
+                return tf.browser.fromPixels(canvas)
                     .toFloat()
                     .div(255)
                     .expandDims();
-                
-                // Execute model
-                const output = model.execute(tensor, 'Identity');
-                return output.squeeze();
             });
+            
+            try {
+                // Execute model
+                const output = await model.executeAsync(tensor);
+                
+                // Convert output to array
+                const maskArray = await processModelOutput(output);
+                
+                return maskArray;
+            } finally {
+                // Clean up tensors
+                tensor.dispose();
+                await tf.nextFrame();
+            }
         }
         
-        // Create perfect quality result
-        async function createPerfectResult(img, mask, offsetX, offsetY, width, height) {
+        // Process model output
+        async function processModelOutput(output) {
+            // Get the actual mask tensor
+            let maskTensor = output;
+            if (Array.isArray(output)) {
+                maskTensor = output[0]; // Take first output if multiple
+            }
+            
+            // Remove batch dimension if needed
+            if (maskTensor.shape && maskTensor.shape.length === 4) {
+                maskTensor = maskTensor.squeeze([0]);
+            }
+            
+            // Convert to array
+            const maskArray = await maskTensor.array();
+            
+            // Clean up
+            if (maskTensor !== output) maskTensor.dispose();
+            if (Array.isArray(output)) {
+                output.forEach(t => t.dispose());
+            } else {
+                output.dispose();
+            }
+            
+            return maskArray;
+        }
+        
+        // Create flawless result with perfect edges
+        async function createFlawlessResult(img, maskArray, offsetX, offsetY, procWidth, procHeight) {
             const resultCanvas = document.getElementById('result');
             resultCanvas.width = img.width;
             resultCanvas.height = img.height;
@@ -272,8 +249,8 @@
             const imageData = resultCtx.getImageData(0, 0, img.width, img.height);
             
             // Calculate scale factors
-            const scaleX = width / (mask.width || BASE_SIZE);
-            const scaleY = height / (mask.height || BASE_SIZE);
+            const scaleX = procWidth / PROCESSING_SIZE;
+            const scaleY = procHeight / PROCESSING_SIZE;
             
             // Edge refinement parameters
             const edgeSmoothingRadius = 2;
@@ -283,47 +260,37 @@
             for (let y = 0; y < img.height; y++) {
                 for (let x = 0; x < img.width; x++) {
                     // Calculate position in mask
-                    const maskX = Math.min((mask.width || BASE_SIZE) - 1, Math.floor((x / img.width) * width / scaleX));
-                    const maskY = Math.min((mask.height || BASE_SIZE) - 1, Math.floor((y / img.height) * height / scaleY));
+                    const maskX = Math.min(PROCESSING_SIZE - 1, Math.floor((x / img.width) * procWidth / scaleX));
+                    const maskY = Math.min(PROCESSING_SIZE - 1, Math.floor((y / img.height) * procHeight / scaleY));
                     
-                    // Get mask value (handles both array and imagedata)
-                    let maskValue;
-                    if (mask.data) {
-                        // ImageData format
-                        const idx = (maskY * (mask.width || BASE_SIZE) + maskX) * 4;
-                        maskValue = mask.data[idx] / 255;
-                    } else {
-                        // Array format
-                        maskValue = mask[maskY][maskX];
-                    }
+                    // Get base mask value
+                    let maskValue = maskArray[maskY][maskX];
                     
-                    // Edge refinement for smooth transitions
+                    // Edge refinement - check neighboring pixels
                     if (maskValue > edgeThreshold && maskValue < (1 - edgeThreshold)) {
                         let edgeSum = 0;
                         let edgeCount = 0;
                         
                         for (let dy = -edgeSmoothingRadius; dy <= edgeSmoothingRadius; dy++) {
                             for (let dx = -edgeSmoothingRadius; dx <= edgeSmoothingRadius; dx++) {
-                                const nx = Math.min((mask.width || BASE_SIZE) - 1, Math.max(0, maskX + dx));
-                                const ny = Math.min((mask.height || BASE_SIZE) - 1, Math.max(0, maskY + dy));
+                                const nx = Math.min(PROCESSING_SIZE - 1, Math.max(0, maskX + dx));
+                                const ny = Math.min(PROCESSING_SIZE - 1, Math.max(0, maskY + dy));
                                 
-                                if (mask.data) {
-                                    const nIdx = (ny * (mask.width || BASE_SIZE) + nx) * 4;
-                                    edgeSum += mask.data[nIdx] / 255;
-                                } else {
-                                    edgeSum += mask[ny][nx];
-                                }
+                                edgeSum += maskArray[ny][nx];
                                 edgeCount++;
                             }
                         }
                         
-                        // Apply smoothing
+                        // Smooth transition at edges
                         maskValue = edgeSum / edgeCount;
                     }
                     
+                    // Apply threshold after smoothing
+                    const alpha = maskValue > 0.5 ? 255 : 0;
+                    
                     // Set alpha channel
                     const idx = (y * img.width + x) * 4 + 3;
-                    imageData.data[idx] = maskValue > 0.5 ? 255 : 0;
+                    imageData.data[idx] = alpha;
                 }
             }
             
@@ -332,8 +299,10 @@
             resultCanvas.style.display = 'block';
             
             // Set download link with highest quality
-            document.getElementById('download').href = resultCanvas.toDataURL('image/png', 1.0);
-            document.getElementById('download').style.display = 'inline-block';
+            const downloadLink = document.getElementById('download');
+            downloadLink.href = resultCanvas.toDataURL('image/png', 1.0);
+            downloadLink.style.display = 'inline-block';
+            downloadLink.download = `flawless-bg-removed-${Date.now()}.png`;
         }
     </script>
 </body>
