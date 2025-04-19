@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Reliable Background Remover</title>
+    <title>Background Remover - Fixed Version</title>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
     <style>
         body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
@@ -13,6 +13,7 @@
         .column { flex: 1; text-align: center; }
         button { padding: 10px 20px; background: #4285f4; color: white; border: none; border-radius: 4px; cursor: pointer; }
         #progress { width: 100%; margin: 10px 0; display: none; }
+        #retry-button { display: none; margin-top: 10px; }
     </style>
 </head>
 <body>
@@ -23,8 +24,9 @@
         <p>or drag and drop image here</p>
     </div>
     
-    <div id="status">Loading model...</div>
+    <div id="status">Initializing...</div>
     <progress id="progress" value="0" max="100"></progress>
+    <button id="retry-button" onclick="retryModelLoading()">Retry Loading Model</button>
     
     <div class="container">
         <div class="column">
@@ -43,6 +45,8 @@
         // Configuration
         const MODEL_PATH = 'model/model.json';
         const TARGET_SIZE = 320; // U²-Net expects 320x320
+        const MAX_RETRIES = 3;
+        let retryCount = 0;
         
         // Global variables
         let model = null;
@@ -50,7 +54,7 @@
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
             setupDragDrop();
-            loadModel();
+            loadModelWithRetry();
             
             document.getElementById('upload').addEventListener('change', (e) => {
                 if (e.target.files[0]) processFile(e.target.files[0]);
@@ -77,30 +81,86 @@
             });
         }
         
-        // Load TensorFlow.js model
-        async function loadModel() {
+        // Retry model loading
+        function retryModelLoading() {
+            document.getElementById('retry-button').style.display = 'none';
+            loadModelWithRetry();
+        }
+        
+        // Load model with retry mechanism
+        async function loadModelWithRetry() {
             try {
                 document.getElementById('status').textContent = "Loading model...";
                 document.getElementById('progress').style.display = 'block';
                 
-                // Verify model exists
-                const response = await fetch(MODEL_PATH);
-                if (!response.ok) throw new Error("Model files not found");
-                
-                // Load the model with progress updates
-                model = await tf.loadGraphModel(MODEL_PATH, {
-                    onProgress: (progress) => {
-                        const percent = Math.round(progress * 100);
-                        document.getElementById('progress').value = percent;
-                        document.getElementById('status').textContent = `Loading model: ${percent}%`;
-                    }
-                });
+                await loadModel();
                 
                 document.getElementById('progress').style.display = 'none';
                 document.getElementById('status').textContent = "Ready! Select an image";
             } catch (error) {
-                document.getElementById('status').textContent = `Error loading model: ${error.message}`;
-                console.error("Model loading failed:", error);
+                retryCount++;
+                if (retryCount <= MAX_RETRIES) {
+                    document.getElementById('status').textContent = 
+                        `Error loading model (attempt ${retryCount}/${MAX_RETRIES}). Trying again...`;
+                    document.getElementById('retry-button').style.display = 'block';
+                    console.error(`Model loading failed (attempt ${retryCount}):`, error);
+                    
+                    // Exponential backoff
+                    await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, retryCount)));
+                    loadModelWithRetry();
+                } else {
+                    document.getElementById('progress').style.display = 'none';
+                    document.getElementById('status').textContent = 
+                        "Failed to load model after multiple attempts. Please refresh the page.";
+                    document.getElementById('retry-button').style.display = 'block';
+                    console.error("Final model loading failure:", error);
+                }
+            }
+        }
+        
+        // Load TensorFlow.js model with improved error handling
+        async function loadModel() {
+            // Verify model exists first
+            const test = await fetchWithRetry(MODEL_PATH);
+            if (!test.ok) throw new Error("Model files not found");
+            
+            // Load the model with progress updates
+            model = await tf.loadGraphModel(MODEL_PATH, {
+                onProgress: (progress) => {
+                    const percent = Math.round(progress * 100);
+                    document.getElementById('progress').value = percent;
+                    document.getElementById('status').textContent = `Loading model: ${percent}%`;
+                },
+                requestInit: {
+                    // Important for GitHub Pages
+                    cache: 'force-cache',
+                    headers: {
+                        'Accept-Encoding': 'gzip, deflate, br'
+                    }
+                }
+            });
+            
+            // Verify model loaded correctly
+            if (!model || !model.predict) {
+                throw new Error("Model loaded but appears invalid");
+            }
+        }
+        
+        // Custom fetch with retry for shard files
+        async function fetchWithRetry(url, retries = 3) {
+            try {
+                const response = await fetch(url, {
+                    cache: 'force-cache',
+                    headers: {
+                        'Accept-Encoding': 'gzip, deflate, br'
+                    }
+                });
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                return response;
+            } catch (error) {
+                if (retries <= 0) throw error;
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                return fetchWithRetry(url, retries - 1);
             }
         }
         
@@ -170,7 +230,7 @@
             return { canvas, offsetX, offsetY, width, height };
         }
         
-        // Process image with model - completely fixed version
+        // Process image with model
         async function processWithModel(canvas) {
             // Create input tensor
             const tensor = tf.tidy(() => {
@@ -184,7 +244,7 @@
                 // Execute model
                 const output = await model.executeAsync(tensor);
                 
-                // Convert output to array (fixed version)
+                // Convert output to array
                 const maskArray = await processModelOutput(output);
                 
                 return maskArray;
@@ -195,21 +255,20 @@
             }
         }
         
-        // Process model output - handles all cases
+        // Process model output
         async function processModelOutput(output) {
-            // Get the actual mask tensor (handles nested outputs)
+            // Get the actual mask tensor
             let maskTensor = output;
             if (Array.isArray(output)) {
-                // Some models return multiple outputs, we want the first one
-                maskTensor = output[0];
+                maskTensor = output[0]; // Take first output if multiple
             }
             
             // Remove batch dimension if needed
-            if (maskTensor.shape.length === 4) {
+            if (maskTensor.shape && maskTensor.shape.length === 4) {
                 maskTensor = maskTensor.squeeze([0]);
             }
             
-            // Convert to 2D array
+            // Convert to array
             const maskArray = await maskTensor.array();
             
             // Clean up
